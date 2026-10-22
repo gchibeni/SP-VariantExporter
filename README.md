@@ -1,4 +1,4 @@
-## SP Variant Exporter
+## SP VariantExporter
 
 A lightweight plugin for **Adobe Substance 3D Painter** that exports every color variation of a texture set in one click — numbered, organized and with your layer stack left exactly as it was.
 
