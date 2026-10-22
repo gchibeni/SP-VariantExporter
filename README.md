@@ -88,30 +88,8 @@ Then, in Painter, click **Python › Reload Plugins Folder** and tick **Variant 
 
 <br>
 
-## :file_folder: Project Structure
-
-```
-├── __init__.py          Plugin entry: dock panel, File menu entry, Painter events
-├── core.py              Export logic: variations, file names, export calls
-├── ui.py                Panel, Variant Exporter window and its Export tab
-├── theme.py             Colors, stylesheet and line icons
-├── dock_placement.py    Remembers where the panel is docked
-├── assets_install.py    Copies the bundled presets / template into the user's shelf
-├── self_update.py       Reloads the plugin in place when its files are updated
-├── version.py           Plugin version
-└── assets/
-    ├── export-presets/  Bundled export presets (.spexp)
-    └── templates/       Bundled project template (.spt)
-```
-
-To release a new version, update `version.py` and `CHANGELOG.md`.
-
-<br>
-
 ## :scroll: License
 
 Released under the [MIT License](LICENSE).
 
 <br>
-
-#### NOW you are all set. Happy exporting!
