@@ -13,7 +13,7 @@ import substance_painter.project as sp_project
 import substance_painter.textureset as sp_textureset
 import substance_painter.ui as sp_ui
 
-from . import core, theme as th
+from . import core, diag, theme as th
 from .version import __version__
 
 METADATA_CONTEXT = "em_variant_exporter"
@@ -27,6 +27,12 @@ TEMPLATE_DEFAULT = "Template default"
 TITLE = "Variant Exporter"
 DEFAULT_EXPORT_PRESET = "!EM-PDP"   # shipped in assets/export-presets
 ICON_SIZE = 14
+
+
+def _project_locked(exc):
+    """Painter refuses metadata access while the project is locked: while it is being
+    closed (Painter quitting), saved, exported or baked. Expected, not an error."""
+    return "locked" in str(exc).lower()
 
 
 def _size_label(size):
@@ -765,8 +771,12 @@ class VariantExporterPanel(QtWidgets.QWidget):
                 legacy = meta.get("settings") if "settings" in meta.list() else None
                 if legacy:
                     candidates.append(dict(legacy, saved_at=0.0))
-        except Exception:
-            sp_log.warning(f"[{TITLE}] could not read saved settings:\n{traceback.format_exc()}")
+        except Exception as exc:
+            if _project_locked(exc):
+                diag.trace("settings: project locked, reading the local copy only")
+            else:
+                sp_log.warning(f"[{TITLE}] could not read saved settings:\n"
+                               f"{traceback.format_exc()}")
         path = self._local_store_path()
         if path and os.path.exists(path):
             try:
@@ -807,8 +817,13 @@ class VariantExporterPanel(QtWidgets.QWidget):
             # Stored as JSON text: Painter keeps metadata numbers as 32-bit floats, which
             # mangled the save timestamp (and could pick an older copy on load).
             sp_project.Metadata(METADATA_CONTEXT).set(METADATA_KEY, json.dumps(data))
-        except Exception:
-            sp_log.warning(f"[{TITLE}] could not save settings:\n{traceback.format_exc()}")
+        except Exception as exc:
+            if _project_locked(exc):
+                # Happens on every quit (Painter locks the project while closing it): the
+                # local copy below still gets the latest settings.
+                diag.trace("settings: project locked, kept the local copy only")
+            else:
+                sp_log.warning(f"[{TITLE}] could not save settings:\n{traceback.format_exc()}")
         path = self._local_store_path()
         if path:
             try:
@@ -1040,6 +1055,7 @@ class VariantExporterWindow(QtWidgets.QDialog):
             return
         if not self._done:
             self._done = True
+            diag.trace("window closing")
             if self.tabs.currentIndex() == self.EXPORT:
                 self.page.store(self.panel.settings())
             self.panel.save_settings()
@@ -1178,22 +1194,39 @@ class _FolderCell(QtWidgets.QWidget):
         super().leaveEvent(event)
 
 
-class _HidePainterProgress(QtCore.QObject):
-    """While installed, hides Painter's own export progress window (one pops up per export
-    call): our dialog shows the progress instead. Use as a context manager."""
+class _HidePainterProgress:
+    """While active, hides Painter's own export progress window (one pops up per export
+    call): our dialog shows the progress instead. Use as a context manager.
 
-    def eventFilter(self, obj, event):
-        if event.type() == QtCore.QEvent.Show and isinstance(obj, QtWidgets.QProgressDialog):
-            obj.setWindowOpacity(0.0)            # invisible right away...
-            QtCore.QTimer.singleShot(0, obj.hide)  # ...and hidden once it's done showing
-        return False
+    Watches the top-level windows from a timer on the main thread. It used to be an
+    application-wide event filter catching the window's Show event, but such a filter hands
+    every QObject that receives an event during the export to Python - Painter's internals,
+    worker-thread objects included - and Painter then crashed on exit (access violation while
+    tearing down) whenever an export had run, even a cancelled one.
+    """
+
+    POLL_MS = 10
+
+    def __init__(self):
+        self._timer = None
+
+    @staticmethod
+    def _poll():
+        for w in QtWidgets.QApplication.topLevelWidgets():
+            if isinstance(w, QtWidgets.QProgressDialog) and w.isVisible():
+                w.hide()
 
     def __enter__(self):
-        QtWidgets.QApplication.instance().installEventFilter(self)
+        self._timer = QtCore.QTimer()
+        self._timer.setInterval(self.POLL_MS)
+        self._timer.timeout.connect(self._poll)
+        self._timer.start()
         return self
 
     def __exit__(self, *_):
-        QtWidgets.QApplication.instance().removeEventFilter(self)
+        if self._timer is not None:
+            self._timer.stop()
+            self._timer = None
         return False
 
 
@@ -2060,22 +2093,26 @@ class ExportPage(QtWidgets.QWidget):
         self.log.show()
         self.log.setPlainText("Exporting...")
         self._set_exporting(True)
+        diag.trace("export begin")
         try:
             with _HidePainterProgress():
                 files, warnings = core.run_export(settings, self.panel.groups, variations,
                                                   self.panel.stack(), progress, numbers)
         except core.ExportCancelled:
+            diag.trace("export cancelled")
             self.log.appendPlainText("Cancelled. Layer visibility has been restored.")
             self._set_exporting(False)
             self._show_log()
             return
         except Exception:
+            diag.trace("export failed")
             self._log_error("Export failed (layer visibility has been restored)")
             self._set_exporting(False)
             self._show_log()
             return
         finally:
             self._set_exporting(False)
+        diag.trace(f"export end ({len(files)} files)")
         lines = [f"Exported {len(files)} file(s) for {len(variations)} variation(s) "
                  f"to {settings.export_dir}"]
         skipped = [core.default_suffix(m.key).lstrip("_") for m in settings.maps if not m.enabled]

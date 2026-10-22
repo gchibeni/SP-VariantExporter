@@ -2,6 +2,8 @@
 
 Every start also writes "<plugins folder>/.Variant Exporter.loaded-<process id>": the installer
 waits for it to know the plugin is running in that Painter, without poking Painter's menus.
+The file is removed when the plugin closes (and stale ones left by a crashed Painter are
+cleaned up at the next start).
 
 After replacing the plugin files, the installer writes "<plugins folder>/.Variant Exporter.reload".
 The running plugin checks for it every couple of seconds; when it appears, it removes it (the
@@ -9,9 +11,11 @@ installer takes that as "picked up") and restarts itself on the new files - the 
 Painter's own plugin reloading works. Dot-named files are ignored by Painter's plugin scan.
 """
 
+import glob
 import importlib
 import os
 import sys
+import time
 import traceback
 
 from PySide6 import QtCore
@@ -24,12 +28,14 @@ PLUGINS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MARKER = os.path.join(PLUGINS_DIR, f".{PACKAGE}.reload")
 LOADED = os.path.join(PLUGINS_DIR, f".{PACKAGE}.loaded-{os.getpid()}")
 CHECK_INTERVAL_MS = 2000
+_STALE_AFTER_S = 24 * 3600   # "loaded" notes older than this belong to a Painter that is gone
 
 _state = {}
 
 
 def start():
     _remove_marker()   # a fresh start already runs the latest files
+    _remove_stale_loaded_notes()
     try:   # "running in this Painter" note for the installer
         from .version import __version__
         with open(LOADED, "w", encoding="utf-8") as f:
@@ -47,6 +53,10 @@ def stop():
     timer = _state.pop("timer", None)
     if timer is not None:
         timer.stop()
+    try:
+        os.remove(LOADED)
+    except OSError:
+        pass
 
 
 def _remove_marker():
@@ -54,6 +64,16 @@ def _remove_marker():
         os.remove(MARKER)
     except OSError:
         pass
+
+
+def _remove_stale_loaded_notes():
+    now = time.time()
+    for path in glob.glob(os.path.join(PLUGINS_DIR, f".{PACKAGE}.loaded-*")):
+        try:
+            if path != LOADED and now - os.path.getmtime(path) > _STALE_AFTER_S:
+                os.remove(path)
+        except OSError:
+            pass
 
 
 def _check():

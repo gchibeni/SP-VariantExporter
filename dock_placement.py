@@ -2,13 +2,22 @@
 
 Painter only restores a plugin dock if its saved layout knows it; when it doesn't, the dock
 comes back floating (sometimes behind other windows). So we remember the placement ourselves.
+
+The QDockWidget returned by add_dock_widget() is not the one the panel lives in for long:
+Painter rebuilds it while applying its layout at start-up (the original is deleted, the panel
+is re-parented into a new one). So the dock is always looked up from the panel's parent, never
+kept, and the signals are watched through a small QObject owned by the dock itself: it goes
+away with the dock, so nothing can call into Python through a dead connection.
 """
 
 import json
 
+import shiboken6
 from PySide6 import QtCore, QtWidgets
 
 import substance_painter.ui as sp_ui
+
+from . import diag
 
 PROPERTIES_DOCK = "Tool"   # objectName of Painter's Properties dock
 _SETTINGS = ("EM", "em_variant_exporter")
@@ -29,8 +38,49 @@ def _load():
         return None
 
 
+def _valid(obj):
+    return obj is not None and shiboken6.isValid(obj)
+
+
+def current_dock():
+    """The QDockWidget the panel lives in right now (None if the panel is gone or undocked)."""
+    panel = _state.get("panel")
+    if not _valid(panel):
+        return None
+    try:
+        parent = panel.parentWidget()
+    except RuntimeError:
+        return None
+    if isinstance(parent, QtWidgets.QDockWidget) and _valid(parent):
+        return parent
+    return None
+
+
+class _Tracker(QtCore.QObject):
+    """Saves the placement whenever the dock it belongs to is moved. Owned by that dock."""
+
+    def __init__(self, dock):
+        super().__init__(dock)
+        dock.dockLocationChanged.connect(self._changed)
+        dock.topLevelChanged.connect(self._changed)
+
+    def _changed(self, *_):
+        if _state.get("tracking"):
+            dock = self.parent()
+            if _valid(dock):
+                save(dock)
+
+
+def _track(dock):
+    """Make sure the current dock is being watched (Painter may have replaced it)."""
+    tracker = _state.get("tracker")
+    if _valid(tracker) and tracker.parent() is dock:
+        return
+    _state["tracker"] = _Tracker(dock)
+
+
 def save(dock):
-    if not _state.get("tracking"):
+    if not _state.get("tracking") or not _valid(dock):
         return
     mw = sp_ui.get_main_window()
     if dock.isFloating():
@@ -80,44 +130,50 @@ def _start_tracking_later():
     timer.start()
 
 
-def attach(dock):
+def attach(panel):
     """Restore the placement now (deferred) and keep saving it whenever the user moves it."""
-    _state["dock"] = dock
-    on_change = lambda *_: save(dock)   # noqa: E731
-    dock.dockLocationChanged.connect(on_change)
-    dock.topLevelChanged.connect(on_change)
-    _state["on_change"] = on_change
-    QtCore.QTimer.singleShot(0, lambda: _restore_if_alive(dock))
+    _state["panel"] = panel
+    _refresh()
+    QtCore.QTimer.singleShot(0, _restore_current)
     _start_tracking_later()
 
 
 def on_gui_started():
     """Painter applies its own layout late during start-up: put the panel back afterwards."""
-    dock = _state.get("dock")
+    _restore_current()
+    _start_tracking_later()
+
+
+def _refresh():
+    """Pick up the dock the panel currently lives in; returns it (or None)."""
+    dock = current_dock()
     if dock is not None:
-        _restore_if_alive(dock)
-        _start_tracking_later()
+        _track(dock)
+    return dock
 
 
-def _restore_if_alive(dock):
+def _restore_current():
+    dock = _refresh()
+    if dock is None:
+        diag.trace("dock placement: no dock to restore")
+        return
     try:
         restore(dock)
-    except RuntimeError:   # dock already deleted (plugin closed)
+    except RuntimeError:   # dock deleted meanwhile (plugin closed)
         pass
 
 
 def detach():
     _state["tracking"] = False
-    # Disconnect: Painter's teardown moves the dock one last time, and calling into Python
-    # then crashes it.
-    dock, on_change = _state.get("dock"), _state.pop("on_change", None)
-    if dock is not None and on_change is not None:
-        for signal in ("dockLocationChanged", "topLevelChanged"):
-            try:
-                getattr(dock, signal).disconnect(on_change)
-            except (RuntimeError, TypeError):
-                pass
+    # The tracker lives inside the dock: delete it now so Painter's own teardown (which moves
+    # docks one last time) can no longer reach into Python through it.
+    tracker = _state.pop("tracker", None)
+    if _valid(tracker):
+        try:
+            shiboken6.delete(tracker)
+        except RuntimeError:
+            pass
     timer = _state.pop("timer", None)
     if timer is not None:
         timer.stop()
-    _state.pop("dock", None)
+    _state.pop("panel", None)

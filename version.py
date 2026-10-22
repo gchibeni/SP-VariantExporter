@@ -1,3 +1,3 @@
 """Plugin version, shown in the Variant Exporter window title."""
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
