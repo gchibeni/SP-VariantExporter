@@ -1197,6 +1197,65 @@ class _HidePainterProgress(QtCore.QObject):
         return False
 
 
+class _OverwriteDialog(QtWidgets.QDialog):
+    """Popup shown when files the export would write are already in the output folder:
+    Cancel the export, Increment the numbers past the existing files, or Overwrite them."""
+
+    CANCEL, INCREMENT, OVERWRITE = range(3)
+
+    def __init__(self, parent, existing, numbered):
+        """`existing`: the conflicting files; `numbered`: whether the export has numbered
+        (per variation) files, i.e. whether Increment makes sense."""
+        super().__init__(parent)
+        self.setWindowTitle(TITLE)
+        self.setMinimumWidth(460)
+        _themed_root(self)
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setSpacing(10)
+        title = _label("Overwrite files?", "")
+        font = title.font()
+        font.setBold(True)
+        title.setFont(font)
+        lay.addWidget(title)
+        text = _label("There's already output files with conflicting names in the destination.", "")
+        text.setWordWrap(True)
+        lay.addWidget(text)
+
+        files = QtWidgets.QPlainTextEdit("\n".join(existing))
+        files.setReadOnly(True)
+        files.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
+        files.setFixedHeight(min(26 + 18 * len(existing), 150))
+        files.setToolTip(f"{len(existing)} file(s) would be replaced")
+        lay.addWidget(files)
+
+        if numbered:
+            hint = _label("Increment: the new files are numbered after the existing ones "
+                          "(e.g. file_0004 after file_0003). Maps exported once are still replaced.")
+            hint.setWordWrap(True)
+            lay.addWidget(hint)
+        lay.addSpacing(4)
+        lay.addWidget(_separator())
+
+        cancel = _button("Cancel")
+        cancel.clicked.connect(lambda: self.done(self.CANCEL))
+        buttons = [cancel]
+        if numbered:
+            increment = _button("Increment", primary=True)
+            increment.setToolTip("Keep the existing files: number the new ones after them")
+            increment.clicked.connect(lambda: self.done(self.INCREMENT))
+            increment.setDefault(True)
+            buttons.append(increment)
+        overwrite = _button("Overwrite", primary=not numbered)
+        overwrite.setToolTip("Replace the existing files")
+        overwrite.clicked.connect(lambda: self.done(self.OVERWRITE))
+        buttons.append(overwrite)
+        lay.addLayout(_equal_row(*buttons))
+
+    def reject(self):   # Esc / window close
+        self.done(self.CANCEL)
+
+
 class _NameOverrideDialog(QtWidgets.QDialog):
     """Small popup: override the file name, prefix and/or suffix of one output map.
     Empty fields fall back to the main file name / prefix / suffix."""
@@ -1972,6 +2031,23 @@ class ExportPage(QtWidgets.QWidget):
         if not variations and any(m.per_variation and m.enabled for m in settings.maps):
             QtWidgets.QMessageBox.warning(self, TITLE, "No variation is checked.")
             return
+        numbers = self.panel.variation_numbers()
+
+        # Files with the same names already there? Ask before touching anything.
+        try:
+            jobs = core.build_jobs(settings, variations, self.panel.stack(), numbers)
+            existing = core.existing_files(jobs)
+        except Exception:
+            self._log_error("Could not check the output folder")
+            self._show_log()
+            return
+        if existing:
+            dlg = _OverwriteDialog(self, existing, numbered=any(j.index for j in jobs))
+            choice = dlg.exec()
+            if choice == _OverwriteDialog.CANCEL:
+                return
+            if choice == _OverwriteDialog.INCREMENT:
+                numbers = core.incremented_numbers(jobs, settings, variations, numbers)
 
         def progress(done, total, label):
             self.progress_bar.setMaximum(total)
@@ -1987,8 +2063,7 @@ class ExportPage(QtWidgets.QWidget):
         try:
             with _HidePainterProgress():
                 files, warnings = core.run_export(settings, self.panel.groups, variations,
-                                                  self.panel.stack(), progress,
-                                                  self.panel.variation_numbers())
+                                                  self.panel.stack(), progress, numbers)
         except core.ExportCancelled:
             self.log.appendPlainText("Cancelled. Layer visibility has been restored.")
             self._set_exporting(False)

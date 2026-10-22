@@ -3,7 +3,7 @@
 A lightweight plugin for **Adobe Substance 3D Painter** that exports every color variation of a texture set in one click — numbered, organized and with your layer stack left exactly as it was.
 
 > [!NOTE]
-> **SP Variant Exporter is in its first release (v0.1.0).** Everything below is up and running, and has been tested on Windows with Painter 12. See the [Changelog](CHANGELOG.md) for what's new.
+> **SP Variant Exporter is at v0.1.1.** Everything below is up and running, and has been tested on Windows with Painter 12. See the [Changelog](CHANGELOG.md) for what's new.
 
 <br>
 
@@ -34,6 +34,7 @@ A lightweight plugin for **Adobe Substance 3D Painter** that exports every color
 - **Any export template** — including the bundled `!EM-OPT` and `!EM-PDP` presets.
 - **Formats & sizes** — file type, bit depth, padding (infinite by default), dithering, and several sizes at once, each in its own subfolder.
 - **Quiet exports** — progress is shown inline instead of Painter's export popup.
+- **No accidental overwrites** — if files with the same names already exist you can cancel, overwrite, or **increment**: the new files are numbered after the existing ones.
 
 <br>
 

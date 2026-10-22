@@ -301,6 +301,7 @@ class Job:
     output: OutputSetting
     config: dict
     folders: List[str] = field(default_factory=list)   # dirs to create before exporting
+    index: str = ""   # zero-padded number in the numbered file names ("0001"), "" if none
 
 
 def file_name(settings, map_setting, index=""):
@@ -317,6 +318,11 @@ def file_name(settings, map_setting, index=""):
         suffix = "_" + suffix
     number = f"_{index}" if index else ""
     return f"{prefix}{map_setting.name or settings.base_name}{suffix}{map_setting.suffix}{number}"
+
+
+def variation_numbers(settings, variations):
+    """Default numbering: uid -> number, consecutive from settings.start_index."""
+    return {v.uid: settings.start_index + i for i, v in enumerate(variations)}
 
 
 def build_jobs(settings, variations, stack, numbers=None):
@@ -336,7 +342,7 @@ def build_jobs(settings, variations, stack, numbers=None):
         # Nested subfolders are fine ("PBR/Ocean"); accept backslashes and stray slashes.
         return (m.folder or "").replace("\\", "/").strip().strip("/")
 
-    def job(variation, out, named_maps):
+    def job(variation, out, named_maps, index=""):
         """One Painter export call: every map of one size, map subfolders included in the
         file names. (Painter renders one resolution per call, so sizes stay separate calls.
         Fewer calls = fewer of Painter's export windows and less overhead.)"""
@@ -348,31 +354,90 @@ def build_jobs(settings, variations, stack, numbers=None):
             if folder:
                 folders.add(os.path.join(settings.export_dir, out.folder, folder))
         return Job(variation, out, _config(stack, settings, out, template, names),
-                   sorted(f.replace("\\", "/") for f in folders))
+                   sorted(f.replace("\\", "/") for f in folders), index)
 
     jobs = []
     if variant and variations:
         # Maps exported once ride along with the first variation's calls.
+        numbers = numbers or variation_numbers(settings, variations)
         for i, var in enumerate(variations):
-            number = numbers[var.uid] if numbers else settings.start_index + i
-            index = str(number).zfill(settings.digits)
+            index = str(numbers[var.uid]).zfill(settings.digits)
             for out in outputs:
                 named = [(m, file_name(settings, m, index)) for m in variant]
                 if i == 0:
                     named += [(m, file_name(settings, m)) for m in static]
-                jobs.append(job(var, out, named))
+                jobs.append(job(var, out, named, index))
     elif static:
         for out in outputs:
             jobs.append(job(None, out, [(m, file_name(settings, m)) for m in static]))
     return jobs
 
 
-def preview_files(jobs):
+def _job_files(job):
+    """Files one export call would write, as Painter resolves them ($textureSet, UDIM...)."""
     files = []
-    for job in jobs:
-        for paths in sp_export.list_project_textures(job.config).values():
-            files.extend(paths)
+    for paths in sp_export.list_project_textures(job.config).values():
+        files.extend(os.path.normpath(p) for p in paths)
     return files
+
+
+def preview_files(jobs):
+    return [f for job in jobs for f in _job_files(job)]
+
+
+# --------------------------------------------------------------------------- conflicts
+
+def existing_files(jobs):
+    """Files the export would write that are already in the output folders."""
+    return [f for f in preview_files(jobs) if os.path.exists(f)]
+
+
+def highest_existing_number(jobs):
+    """Highest number already used on disk by files named like the numbered ones in `jobs`
+    (file_0001 to be written, file_0001..file_0003 present -> 3). None when there is none.
+
+    Every numbered file is looked up by its own pattern (map, size subfolder, UDIM tile), so
+    files of other maps or with other names are not counted.
+    """
+    highest = None
+    listings = {}
+    for job in jobs:
+        if not job.index:
+            continue
+        marker = f"_{job.index}"
+        for path in _job_files(job):
+            folder, name = os.path.split(path)
+            at = name.rfind(marker)
+            # Maps exported once ride along without a number: skip them.
+            if at < 0 or (name[at + len(marker):] and name[at + len(marker)] != "."):
+                continue
+            head, tail = name[:at], name[at + len(marker):]
+            pattern = re.compile(re.escape(head) + r"_(\d+)" + re.escape(tail) + "$",
+                                 re.IGNORECASE)
+            if folder not in listings:
+                try:
+                    listings[folder] = os.listdir(folder)
+                except OSError:
+                    listings[folder] = []
+            for existing in listings[folder]:
+                m = pattern.match(existing)
+                if m:
+                    highest = max(highest or 0, int(m.group(1)))
+    return highest
+
+
+def incremented_numbers(jobs, settings, variations, numbers=None):
+    """Numbering moved up so that the first new file follows the last one already on disk:
+    exporting file_0001 with file_0001..file_0003 present gives file_0004 (gaps between
+    the variations' numbers are kept). Unchanged when nothing numbered is on disk."""
+    numbers = dict(numbers) if numbers else variation_numbers(settings, variations)
+    highest = highest_existing_number(jobs)
+    if highest is None or not numbers:
+        return numbers
+    shift = highest + 1 - min(numbers.values())
+    if shift <= 0:
+        return numbers
+    return {uid: n + shift for uid, n in numbers.items()}
 
 
 # --------------------------------------------------------------------------- export

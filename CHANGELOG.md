@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.1
+
+- Exporting over files that already exist asks what to do: **Cancel**, **Increment**
+  (number the new files after the existing ones, e.g. `_0004` when `_0001`..`_0003` are
+  there) or **Overwrite**.
+
 ## 0.1.0
 
 First release.
